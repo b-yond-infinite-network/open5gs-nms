@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Play,
   Square,
@@ -43,6 +43,8 @@ function formatUptime(timestamp: string | null): string {
 
 function ServiceCard({ status }: { status: ServiceStatus }): JSX.Element {
   const [acting, setActing] = useState(false);
+  const available = status.available !== false;
+  const fetchStatuses = useServiceStore((s) => s.fetchStatuses);
 
   const doAction = async (action: 'start' | 'stop' | 'restart' | 'enable' | 'disable'): Promise<void> => {
     setActing(true);
@@ -50,7 +52,7 @@ function ServiceCard({ status }: { status: ServiceStatus }): JSX.Element {
       const result = await serviceApi.action(status.name, action);
       if (result.success) {
         toast.success(`${status.name.toUpperCase()} ${action} successful`);
-        window.location.reload();
+        await fetchStatuses();
       } else {
         toast.error(result.message);
       }
@@ -74,32 +76,48 @@ function ServiceCard({ status }: { status: ServiceStatus }): JSX.Element {
         <div className="flex items-center gap-2">
           <span
             className={`text-xs px-2 py-1 rounded-full ${
-              status.active
-                ? 'bg-nms-green/10 text-nms-green'
-                : 'bg-nms-red/10 text-nms-red'
+              !available
+                ? 'bg-gray-500/10 text-gray-400'
+                : status.active
+                  ? 'bg-nms-green/10 text-nms-green'
+                  : 'bg-nms-red/10 text-nms-red'
             }`}
           >
-            {status.state}/{status.subState}
+            {available ? `${status.state}/${status.subState}` : 'unavailable'}
           </span>
-          <button
-            onClick={() => doAction(status.enabled ? 'disable' : 'enable')}
-            disabled={acting}
-            className={`text-xs px-2 py-1 rounded-full ${
-              status.enabled
-                ? 'bg-nms-accent/10 text-nms-accent'
-                : 'bg-gray-500/10 text-gray-500'
-            }`}
-            title={status.enabled ? 'Disable at boot' : 'Enable at boot'}
-          >
-            {status.enabled ? <Power className="w-3 h-3" /> : <PowerOff className="w-3 h-3" />}
-          </button>
+          {status.source !== 'kubernetes' && (
+            <button
+              onClick={() => doAction(status.enabled ? 'disable' : 'enable')}
+              disabled={acting}
+              className={`text-xs px-2 py-1 rounded-full ${
+                status.enabled
+                  ? 'bg-nms-accent/10 text-nms-accent'
+                  : 'bg-gray-500/10 text-gray-500'
+              }`}
+              title={status.enabled ? 'Disable at boot' : 'Enable at boot'}
+            >
+              {status.enabled ? <Power className="w-3 h-3" /> : <PowerOff className="w-3 h-3" />}
+            </button>
+          )}
         </div>
       </div>
+
+      {status.statusMessage && (
+        <div
+          className={`mb-4 rounded border px-3 py-2 text-xs ${
+            available
+              ? 'border-nms-border text-nms-text-dim'
+              : 'border-amber-500/20 bg-amber-500/10 text-amber-200'
+          }`}
+        >
+          {status.statusMessage}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-3 mb-4">
         <div className="flex items-center gap-2 text-xs text-nms-text-dim">
           <Hash className="w-3.5 h-3.5" />
-          <span>PID: {status.pid ?? '—'}</span>
+          <span>{status.source === 'kubernetes' ? `Desired: ${status.desiredReplicas ?? 0}` : `PID: ${status.pid ?? '—'}`}</span>
         </div>
         <div className="flex items-center gap-2 text-xs text-nms-text-dim">
           <Clock className="w-3.5 h-3.5" />
@@ -107,7 +125,7 @@ function ServiceCard({ status }: { status: ServiceStatus }): JSX.Element {
         </div>
         <div className="flex items-center gap-2 text-xs text-nms-text-dim">
           <HardDrive className="w-3.5 h-3.5" />
-          <span>Mem: {formatBytes(status.memoryBytes)}</span>
+          <span>{status.source === 'kubernetes' ? `Ready: ${status.readyReplicas ?? 0}` : `Mem: ${formatBytes(status.memoryBytes)}`}</span>
         </div>
         <div className="flex items-center gap-2 text-xs text-nms-text-dim">
           <RefreshCcw className="w-3.5 h-3.5" />
@@ -118,21 +136,21 @@ function ServiceCard({ status }: { status: ServiceStatus }): JSX.Element {
       <div className="flex gap-2 pt-3 border-t border-nms-border">
         <button
           onClick={() => doAction('start')}
-          disabled={acting || status.active}
+          disabled={acting || !available || status.active}
           className="nms-btn-ghost flex items-center gap-1.5 text-xs flex-1 justify-center"
         >
           <Play className="w-3.5 h-3.5" /> Start
         </button>
         <button
           onClick={() => doAction('stop')}
-          disabled={acting || !status.active}
+          disabled={acting || !available || !status.active}
           className="nms-btn-danger flex items-center gap-1.5 text-xs flex-1 justify-center"
         >
           <Square className="w-3.5 h-3.5" /> Stop
         </button>
         <button
           onClick={() => doAction('restart')}
-          disabled={acting}
+          disabled={acting || !available}
           className="nms-btn-primary flex items-center gap-1.5 text-xs flex-1 justify-center"
         >
           <RotateCw className="w-3.5 h-3.5" /> Restart
@@ -144,7 +162,13 @@ function ServiceCard({ status }: { status: ServiceStatus }): JSX.Element {
 
 export function ServicesPage(): JSX.Element {
   const statuses = useServiceStore((s) => s.statuses);
+  const loading = useServiceStore((s) => s.loading);
+  const fetchStatuses = useServiceStore((s) => s.fetchStatuses);
   const [bulkActing, setBulkActing] = useState(false);
+
+  useEffect(() => {
+    void fetchStatuses();
+  }, [fetchStatuses]);
 
   const doBulkAction = async (action: 'start' | 'stop' | 'restart'): Promise<void> => {
     if (!confirm(`Are you sure you want to ${action} ALL services?`)) return;
@@ -157,7 +181,7 @@ export function ServicesPage(): JSX.Element {
       } else {
         toast.error(result.message);
       }
-      window.location.reload();
+      await fetchStatuses();
     } catch (err) {
       toast.error(`Failed to ${action} all services`);
     } finally {
@@ -171,10 +195,17 @@ export function ServicesPage(): JSX.Element {
         <div>
           <h1 className="text-2xl font-semibold font-display">Services</h1>
           <p className="text-sm text-nms-text-dim mt-1">
-            Manage Open5GS network function services
+            Manage Open5GS Kubernetes workloads in the open5gs namespace
           </p>
         </div>
         <div className="flex gap-2">
+          <button
+            onClick={() => void fetchStatuses()}
+            disabled={loading || bulkActing}
+            className="nms-btn-ghost flex items-center gap-2"
+          >
+            <RefreshCcw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} /> Refresh
+          </button>
           <button
             onClick={() => doBulkAction('start')}
             disabled={bulkActing}

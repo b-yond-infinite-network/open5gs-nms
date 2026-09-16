@@ -1,61 +1,62 @@
+import { AxiosError } from 'axios';
 import type { HnetKey, SuciKeysResult, GenerateKeyInput } from '../types/suci';
+import { api } from './index';
 
-// Use relative URL to work with nginx proxy
-// When VITE_API_URL is empty/undefined, use relative path so requests go through nginx
-const API_URL = import.meta.env.VITE_API_URL || '';
+// These calls used to go out through raw fetch(), which bypassed the shared
+// client: no cookie once VITE_API_URL points at another origin, and a session
+// that expired mid-use showed "Failed to list SUCI keys" instead of returning
+// to the login page like every other screen does.
+
+//Keep the API's own error text, which axios otherwise replaces with
+//"Request failed with status code 400"
+function apiError(err: unknown, fallback: string): Error {
+  const detail = (err as AxiosError<{ error?: string }>)?.response?.data?.error;
+  return new Error(detail || fallback);
+}
 
 export const suciApi = {
   // List all SUCI keys
   async listKeys(): Promise<SuciKeysResult> {
-    const res = await fetch(`${API_URL}/api/suci/keys`);
-    if (!res.ok) throw new Error('Failed to list SUCI keys');
-    return res.json();
+    try {
+      return (await api.get<SuciKeysResult>('/suci/keys')).data;
+    } catch (err) {
+      throw apiError(err, 'Failed to list SUCI keys');
+    }
   },
 
   // Get next available PKI ID
   async getNextId(): Promise<number> {
-    const res = await fetch(`${API_URL}/api/suci/next-id`);
-    if (!res.ok) throw new Error('Failed to get next ID');
-    const data = await res.json();
-    return data.nextId;
+    try {
+      return (await api.get<{ nextId: number }>('/suci/next-id')).data.nextId;
+    } catch (err) {
+      throw apiError(err, 'Failed to get next ID');
+    }
   },
 
   // Generate new SUCI key
   async generateKey(input: GenerateKeyInput): Promise<HnetKey> {
-    const res = await fetch(`${API_URL}/api/suci/keys`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
-    });
-    if (!res.ok) {
-      const error = await res.json();
-      throw new Error(error.error || 'Failed to generate key');
+    try {
+      return (await api.post<HnetKey>('/suci/keys', input)).data;
+    } catch (err) {
+      throw apiError(err, 'Failed to generate key');
     }
-    return res.json();
   },
 
   // Regenerate existing SUCI key
   async regenerateKey(id: number, scheme: 1 | 2): Promise<HnetKey> {
-    const res = await fetch(`${API_URL}/api/suci/keys/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scheme }),
-    });
-    if (!res.ok) {
-      const error = await res.json();
-      throw new Error(error.error || 'Failed to regenerate key');
+    try {
+      return (await api.put<HnetKey>(`/suci/keys/${id}`, { scheme })).data;
+    } catch (err) {
+      throw apiError(err, 'Failed to regenerate key');
     }
-    return res.json();
   },
 
   // Delete SUCI key
   async deleteKey(id: number, deleteFile: boolean): Promise<void> {
-    const res = await fetch(`${API_URL}/api/suci/keys/${id}?deleteFile=${deleteFile}`, {
-      method: 'DELETE',
-    });
-    if (!res.ok) {
-      const error = await res.json();
-      throw new Error(error.error || 'Failed to delete key');
+    try {
+      await api.delete(`/suci/keys/${id}`, { params: { deleteFile } });
+    } catch (err) {
+      throw apiError(err, 'Failed to delete key');
     }
   },
 };

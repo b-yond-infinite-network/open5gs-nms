@@ -27,8 +27,13 @@ export class SubscriberManagementUseCase {
     subscribers: SubscriberListItem[];
     total: number;
   }> {
-    const subscribers = await this.subscriberRepo.search(query, skip, limit);
-    return { subscribers, total: subscribers.length };
+    //total counts every match, not the rows on this page, or the UI loses its
+    //pager as soon as a search returns more than one page of subscribers
+    const [subscribers, total] = await Promise.all([
+      this.subscriberRepo.search(query, skip, limit),
+      this.subscriberRepo.countSearch(query),
+    ]);
+    return { subscribers, total };
   }
 
   async getByImsi(imsi: string): Promise<Subscriber | null> {

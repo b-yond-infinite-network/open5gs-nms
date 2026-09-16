@@ -46,3 +46,13 @@ coverage/
 
 # Internal documentation (keep local)
 GIT_PUSH_COMMANDS.md
+
+# Local container/runtime state (never push to GitHub)
+mongo_docker/mongodb_data/
+**/mongodb_data/
+**/data/db/
+
+# Local databases (auth.db and friends)
+*.db
+*.sqlite
+*.sqlite3

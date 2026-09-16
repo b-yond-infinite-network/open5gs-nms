@@ -8,12 +8,13 @@ import { loadAppConfig } from './config';
 import { LocalHostExecutor } from './infrastructure/system/local-host-executor';
 import { YamlConfigRepository } from './infrastructure/yaml/yaml-config-repository';
 import { MongoSubscriberRepository } from './infrastructure/mongodb/mongo-subscriber-repository';
+import { MongoUriResolver } from './infrastructure/mongodb/mongo-uri-resolver';
 import { FileAuditLogger } from './infrastructure/logging/file-audit-logger';
 import { WssBroadcaster } from './infrastructure/websocket/wss-broadcaster';
 import { LoadConfigUseCase } from './application/use-cases/load-config';
 import { ValidateConfigUseCase } from './application/use-cases/validate-config';
 import { ApplyConfigUseCase } from './application/use-cases/apply-config';
-import { ServiceMonitorUseCase } from './application/use-cases/service-monitor';
+import { KubernetesServiceMonitorUseCase } from './application/use-cases/kubernetes-service-monitor';
 import { SubscriberManagementUseCase } from './application/use-cases/subscriber-management';
 import { TopologyUseCase } from './application/use-cases/topology';
 import { BackupRestoreUseCase } from './application/use-cases/backup-restore';
@@ -44,6 +45,10 @@ import { SyncSDUseCase } from './application/use-cases/sync-sd-usecase';
 import { AutoAssignIPsUseCase } from './application/use-cases/auto-assign-ips-usecase';
 import { createSuciRouter } from './interfaces/rest/suci-controller';
 import { createDockerRouter } from './interfaces/rest/docker-controller';
+import { K8sLabUseCase } from './application/use-cases/k8s-lab';
+import { createK8sRouter } from './interfaces/rest/k8s-controller';
+import { LiveSessionsUseCase } from './application/use-cases/live-sessions';
+import { createLiveSessionsRouter } from './interfaces/rest/live-sessions-controller';
 
 async function main() {
   // Load configuration
@@ -70,16 +75,25 @@ async function main() {
   // Initialize infrastructure components
   const hostExecutor = new LocalHostExecutor(logger, config.systemctlPath);
   const configRepo = new YamlConfigRepository(hostExecutor, config.configPath, logger);
-  const subscriberRepo = new MongoSubscriberRepository(config.mongodbUri, logger);
+  const mongoUriResolver = new MongoUriResolver(
+    config.mongodbUri,
+    config.mongodbK8sService,
+    hostExecutor,
+    config.k8sKubeconfig,
+    config.k8sExecUser,
+    logger,
+  );
+  const subscriberRepo = new MongoSubscriberRepository(mongoUriResolver, logger);
   const auditLogger = new FileAuditLogger(config.logDir, logger);
 
   // Initialize audit logger
   await auditLogger.initialize();
   logger.info('Audit logger initialized');
 
-  // Connect to MongoDB
+  // Connect to MongoDB. A dynamic address is resolved here and again on every
+  // reconnect, so the lab can be stopped and started without restarting the NMS.
   await subscriberRepo.connect();
-  logger.info('MongoDB connected');
+  logger.info({ target: mongoUriResolver.describe() }, 'MongoDB connection initialised');
 
   // ── Auth setup ──
   const authRepo = new SqliteAuthRepository(config.authDbPath, logger);
@@ -101,7 +115,28 @@ async function main() {
   }
 
   // Initialize WebSocket server
-  const wss = new WebSocketServer({ port: config.wsPort });
+  //
+  // The socket carries the same privileges as the REST API: it streams the core's
+  // logs and starts a UE's traffic test, which runs a script on the host. Every
+  // /api route sits behind authMiddleware, so the handshake is checked against the
+  // same session here rather than leaving this channel open.
+  const wss = new WebSocketServer({
+    port: config.wsPort,
+    verifyClient: ({ req }, done) => {
+      const sessionId = lucia.readSessionCookie(req.headers.cookie ?? '');
+      if (!sessionId) {
+        done(false, 401, 'Unauthorized');
+        return;
+      }
+      lucia
+        .validateSession(sessionId)
+        .then(({ session }) => done(Boolean(session), 401, 'Unauthorized'))
+        .catch((err: unknown) => {
+          logger.error({ err: String(err) }, 'WebSocket session validation failed');
+          done(false, 500, 'Internal Server Error');
+        });
+    },
+  });
   const wsBroadcaster = new WssBroadcaster(wss, logger);
   logger.info({ wsPort: config.wsPort }, 'WebSocket server started');
 
@@ -119,11 +154,13 @@ async function main() {
   );
   // FIXED: Correct parameter order for ServiceMonitorUseCase
   // constructor(hostExecutor, wsBroadcaster, auditLogger, logger)
-  const serviceMonitorUseCase = new ServiceMonitorUseCase(
+  const serviceMonitorUseCase = new KubernetesServiceMonitorUseCase(
     hostExecutor,
     wsBroadcaster,
     auditLogger,
     logger,
+    config.k8sKubeconfig,
+    config.k8sExecUser,
   );
   const subscriberManagementUseCase = new SubscriberManagementUseCase(
     subscriberRepo,
@@ -137,6 +174,7 @@ async function main() {
     logger,
     config.backupPath,
     config.mongoBackupPath,
+    mongoUriResolver,
   );
   const restoreDefaultsUseCase = new RestoreDefaultsUseCase(
     hostExecutor,
@@ -175,11 +213,26 @@ async function main() {
     configRepo,
     logger,
   );
+  const k8sLabUseCase = new K8sLabUseCase(
+    hostExecutor,
+    logger,
+    config.laas5gsaRoot,
+    config.k8sKubeconfig,
+    config.k8sExecUser,
+  );
+  const liveSessionsUseCase = new LiveSessionsUseCase(
+    hostExecutor,
+    logger,
+    config.k8sKubeconfig,
+    config.k8sExecUser,
+    config.k8sNamespace,
+  );
 
   // Initialize log streaming WebSocket handler
   const logStreamHandler = new LogStreamHandler(
     logStreamingUseCase,
     dockerLogStreamingUseCase,
+    k8sLabUseCase,
     logger,
   );
   wss.on('connection', (ws) => {
@@ -235,14 +288,24 @@ async function main() {
   );
   app.use(
     '/api/subscribers',
-    createSubscriberRouter(subscriberManagementUseCase, autoAssignIPsUseCase, logger),
+    createSubscriberRouter(
+      subscriberManagementUseCase,
+      autoAssignIPsUseCase,
+      k8sLabUseCase,
+      logger,
+    ),
   );
   app.use('/api/audit', createAuditRouter(auditLogger, logger));
   app.use('/api/backup', createBackupRouter(backupRestoreUseCase, restoreDefaultsUseCase, logger));
   app.use('/api/auto-config', createAutoConfigRouter(autoConfigUseCase));
-  app.use('/api/interface-status', createInterfaceRouter(hostExecutor, logger, activeSessionsUseCase, configRepo));
+  app.use(
+    '/api/interface-status',
+    createInterfaceRouter(hostExecutor, logger, activeSessionsUseCase, configRepo, liveSessionsUseCase),
+  );
+  app.use('/api/live-sessions', createLiveSessionsRouter(liveSessionsUseCase, logger));
   app.use('/api/suci', createSuciRouter(suciManagementUseCase, logger));
   app.use('/api/docker', createDockerRouter(dockerLogStreamingUseCase, logger));
+  app.use('/api/k8s', createK8sRouter(k8sLabUseCase, logger));
 
   // Error handler
   app.use(

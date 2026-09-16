@@ -3,6 +3,7 @@ import { clsx } from 'clsx';
 import {
   Radio,
   Settings,
+  Server,
   Users,
   Activity,
   Network,
@@ -29,6 +30,7 @@ const NAV_ITEMS = [
   { id: 'topology', label: 'Topology', icon: Network },
   { id: 'ran', label: 'RAN Network', icon: Radio },
   { id: 'services', label: 'Services', icon: Activity },
+  { id: 'k8s-lab', label: 'K8s Lab', icon: Server },
   { id: 'config', label: 'Configuration', icon: Settings },
   { id: 'auto-config', label: 'Auto Config', icon: Zap },
   { id: 'subscribers', label: 'Subscribers', icon: Users },

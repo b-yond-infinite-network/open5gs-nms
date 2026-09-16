@@ -9,6 +9,62 @@ import type {
 import { configApi, serviceApi, subscriberApi, interfaceApi } from '../api';
 
 // Interface status types
+export interface LiveSliceCount {
+  plmnId: string;
+  snssai: string;
+  value: number;
+}
+
+export interface LiveGnb {
+  pod: string;
+  ip: string;
+}
+
+/** Counts as the AMF and SMF report them about themselves. */
+export interface LiveSessionCounts {
+  available: boolean;
+  reason: string | null;
+  registeredSubscribers: number | null;
+  activePduSessions: number | null;
+  ranUeContexts: number | null;
+  gnbCount: number | null;
+  registeredBySlice: LiveSliceCount[];
+  sessionsBySlice: LiveSliceCount[];
+  gnbs: LiveGnb[];
+  scrapedPods: string[];
+  failedPods: string[];
+  scrapedAt: string;
+}
+
+export interface LivePduSession {
+  id: number;
+  state: string;
+  type: string;
+  dnn: string;
+  sst: string;
+  sd: string;
+  address: string | null;
+}
+
+export interface LiveUe {
+  imsi: string;
+  pod: string;
+  cmState: string;
+  rmState: string;
+  mmState: string;
+  sessions: LivePduSession[];
+}
+
+/** Per-UE rows, read from the RAN side rather than from the core. */
+export interface LiveUeDetail {
+  available: boolean;
+  reason: string | null;
+  source: 'ueransim-nr-cli';
+  ues: LiveUe[];
+  truncated: boolean;
+  scrapedAt: string;
+}
+
 export interface InterfaceStatus {
   // 4G Interfaces
   s1mme: {
@@ -37,6 +93,9 @@ export interface InterfaceStatus {
     ip: string;
     imsi: string;
   }>;
+  live: LiveSessionCounts | null;
+  liveUEs: LiveUeDetail | null;
+  sessionSource: 'live-metrics' | 'host-conntrack';
 }
 
 // ── Config Store ──
@@ -107,7 +166,7 @@ interface TopologyState {
   interfaceStatus: InterfaceStatus | null;
   loading: boolean;
   fetchTopology: () => Promise<void>;
-  fetchInterfaceStatus: () => Promise<void>;
+  fetchInterfaceStatus: (options?: { detail?: boolean }) => Promise<void>;
   setGraph: (graph: TopologyGraph) => void;
 }
 
@@ -125,9 +184,9 @@ export const useTopologyStore = create<TopologyState>((set) => ({
       set({ loading: false });
     }
   },
-  fetchInterfaceStatus: async () => {
+  fetchInterfaceStatus: async (options) => {
     try {
-      const interfaceStatus = await interfaceApi.getStatus();
+      const interfaceStatus = await interfaceApi.getStatus(options?.detail);
       set({ interfaceStatus });
     } catch (err) {
       console.error('Failed to fetch interface status:', err);

@@ -2,6 +2,11 @@ import pino from 'pino';
 import { IHostExecutor } from '../../../domain/interfaces/host-executor';
 import { IConfigRepository } from '../../../domain/interfaces/config-repository';
 import { ActiveSessionsUseCase, ActiveUE } from '../active-sessions';
+import {
+  LiveSessionsUseCase,
+  LiveSessionCounts,
+  LiveUeDetail,
+} from '../live-sessions';
 
 export interface InterfaceStatus {
   // 4G Interfaces
@@ -25,6 +30,24 @@ export interface InterfaceStatus {
   // Separated Active Sessions
   activeUEs4G: ActiveUE[];  // 4G only
   activeUEs5G: ActiveUE[];  // 5G only
+  /**
+   * Counts as the core itself reports them (AMF/SMF metrics). Null when the
+   * deployment is not on Kubernetes, in which case the host checks above are
+   * the only source.
+   */
+  live: LiveSessionCounts | null;
+  /** Per-UE rows, only when the caller asked for them; null otherwise. */
+  liveUEs: LiveUeDetail | null;
+  /** Which source filled activeUEs5G, so the UI need not guess. */
+  sessionSource: 'live-metrics' | 'host-conntrack';
+}
+
+export interface InterfaceStatusOptions {
+  /**
+   * Walk the UE pods for per-UE detail. Costs several execs per UE, so a
+   * status poll leaves it off and a UE view turns it on.
+   */
+  includeUeDetail?: boolean;
 }
 
 export class GetInterfaceStatus {
@@ -33,24 +56,50 @@ export class GetInterfaceStatus {
     private readonly logger: pino.Logger,
     private readonly activeSessionsUseCase: ActiveSessionsUseCase,
     private readonly configRepo: IConfigRepository,
+    private readonly liveSessionsUseCase: LiveSessionsUseCase,
   ) {}
 
-  async execute(): Promise<InterfaceStatus> {
-    const s1mmeStatus = await this.checkS1MME();
-    const s1uStatus = await this.checkS1U();
+  async execute(options: InterfaceStatusOptions = {}): Promise<InterfaceStatus> {
+    //Ask the core first. Whether it answers decides where everything below
+    //comes from, because the host checks cannot see a containerised core.
+    const live = await this.readLiveCounts();
+
+    const [s1mmeStatus, s1uStatus] = await Promise.all([this.checkS1MME(), this.checkS1U()]);
+
+    //No eNodeB on this host means there is no 4G RAN to hold sessions, so the
+    //subnet-and-conntrack scan is skipped rather than run to find nothing. On a
+    //5G-only or containerised deployment that scan has no source to read: the
+    //NF configs are not in CONFIG_PATH and UE traffic never crosses the host's
+    //conntrack, and it logged a "no session pools found" round on every poll.
+    const has4gRan = s1mmeStatus.active || s1uStatus.active;
+
+    let activeUEs4G: ActiveUE[] = [];
+    if (has4gRan) {
+      try {
+        activeUEs4G = await this.activeSessionsUseCase.getActive4GUEs();
+      } catch (error) {
+        this.logger.error({ error }, 'Error getting active 4G UE sessions');
+      }
+    }
+
+    if (live?.available) {
+      return this.fromLive(live, s1mmeStatus, s1uStatus, activeUEs4G, options);
+    }
+
+    //Bare-metal Open5GS: the NFs run on this host, so netstat and conntrack
+    //genuinely see the interfaces and this is still the right answer.
     const n2Status = await this.checkN2();
     const n3Status = await this.checkN3();
-    
-    let activeUEs4G: ActiveUE[] = [];
+
     let activeUEs5G: ActiveUE[] = [];
-    
-    try {
-      activeUEs4G = await this.activeSessionsUseCase.getActive4GUEs();
-      activeUEs5G = await this.activeSessionsUseCase.getActive5GUEs();
-    } catch (error) {
-      this.logger.error({ error }, 'Error getting active UE sessions');
+    if (n2Status.active || n3Status.active) {
+      try {
+        activeUEs5G = await this.activeSessionsUseCase.getActive5GUEs();
+      } catch (error) {
+        this.logger.error({ error }, 'Error getting active 5G UE sessions');
+      }
     }
-    
+
     return {
       s1mme: s1mmeStatus,
       s1u: s1uStatus,
@@ -58,6 +107,79 @@ export class GetInterfaceStatus {
       n3: n3Status,
       activeUEs4G,
       activeUEs5G,
+      live,
+      liveUEs: null,
+      sessionSource: 'host-conntrack',
+    };
+  }
+
+  private async readLiveCounts(): Promise<LiveSessionCounts | null> {
+    try {
+      return await this.liveSessionsUseCase.getCounts();
+    } catch (error) {
+      this.logger.error({ error }, 'Error reading live session counts');
+      return null;
+    }
+  }
+
+  /**
+   * Build the 5G half from what the network reports. N2 peers are the gNodeB
+   * pods the AMF is associated with; N3 is treated as up once the SMF holds a
+   * PDU session, since the user plane terminates inside the UPF pod and no
+   * host-side table can confirm it.
+   */
+  private async fromLive(
+    live: LiveSessionCounts,
+    s1mmeStatus: InterfaceStatus['s1mme'],
+    s1uStatus: InterfaceStatus['s1u'],
+    activeUEs4G: ActiveUE[],
+    options: InterfaceStatusOptions,
+  ): Promise<InterfaceStatus> {
+    const gnbIPs = live.gnbs.map((gnb) => gnb.ip);
+
+    let liveUEs: LiveUeDetail | null = null;
+    if (options.includeUeDetail) {
+      try {
+        liveUEs = await this.liveSessionsUseCase.getUeDetail();
+      } catch (error) {
+        this.logger.error({ error }, 'Error reading live UE detail');
+      }
+    }
+
+    //One row per PDU session: a UE with three sessions holds three UE IPs, and
+    //each is separately routable, so collapsing them would lose addresses.
+    const activeUEs5G: ActiveUE[] = (liveUEs?.ues || []).flatMap((ue) =>
+      ue.sessions
+        .filter((session) => session.address)
+        .map((session) => ({ ip: session.address as string, imsi: ue.imsi })),
+    );
+
+    this.logger.info(
+      {
+        registered: live.registeredSubscribers,
+        sessions: live.activePduSessions,
+        gnbs: gnbIPs.length,
+        ueDetail: options.includeUeDetail,
+      },
+      'Interface status served from live core metrics',
+    );
+
+    return {
+      s1mme: s1mmeStatus,
+      s1u: s1uStatus,
+      n2: {
+        active: (live.gnbCount || 0) > 0,
+        connectedGnodebs: gnbIPs,
+      },
+      n3: {
+        active: (live.activePduSessions || 0) > 0,
+        connectedGnodebs: gnbIPs,
+      },
+      activeUEs4G,
+      activeUEs5G,
+      live,
+      liveUEs,
+      sessionSource: 'live-metrics',
     };
   }
 

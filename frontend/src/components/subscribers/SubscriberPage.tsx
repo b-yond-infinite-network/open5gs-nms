@@ -1,8 +1,33 @@
 import { useEffect, useState } from 'react';
-import { Plus, Search, Trash2, Edit, X, Save, CreditCard, Copy, Download, Shield, Network, List } from 'lucide-react';
+import {
+  Activity,
+  Copy,
+  CreditCard,
+  Download,
+  Edit,
+  List,
+  Loader2,
+  Network,
+  Play,
+  Plus,
+  Save,
+  Search,
+  Shield,
+  Trash2,
+  Unplug,
+  X,
+} from 'lucide-react';
 import { useSubscriberStore, useSuciStore } from '../../stores';
 import { subscriberApi } from '../../api';
-import type { Subscriber, SubscriberListItem, SubscriberSession } from '../../types';
+import { UeTrafficMonitor } from '../common/UeTrafficMonitor';
+import type {
+  Subscriber,
+  SubscriberListItem,
+  SubscriberSession,
+  SubscriberUeAction,
+  SubscriberUeState,
+  SubscriberUeStatus,
+} from '../../types';
 import toast from 'react-hot-toast';
 
 const DEFAULT_SUB: Subscriber = {
@@ -311,8 +336,9 @@ interface GeneratedSIMData {
   provisionError?: string;
 }
 
-function SIMGeneratorDialog({ onClose }: { 
+function SIMGeneratorDialog({ onClose, onProvisioned }: {
   onClose: () => void;
+  onProvisioned: () => void;
 }): JSX.Element {
   const { keys, fetchKeys } = useSuciStore();
   const [mccOption, setMccOption] = useState('001');
@@ -467,7 +493,6 @@ function SIMGeneratorDialog({ onClose }: {
       for (let i = 0; i < sims.length; i++) {
         try {
           const subscriber = simToSubscriber(sims[i]);
-          console.log('Attempting to provision subscriber:', JSON.stringify(subscriber, null, 2));
           await subscriberApi.create(subscriber);
           sims[i].provisioned = true;
           successCount++;
@@ -490,6 +515,10 @@ function SIMGeneratorDialog({ onClose }: {
         toast.error(`⚠️ Generated ${sims.length} SIMs. Provisioned: ${successCount} ✅ | Failed: ${failCount} ❌`, { duration: 6000 });
       } else {
         toast.error(`❌ Failed to provision all SIMs. Generated credentials saved for manual import.`, { duration: 6000 });
+      }
+
+      if (successCount > 0) {
+        onProvisioned();
       }
     } else {
       toast.success(`Generated ${sims.length} SIM credential${sims.length > 1 ? 's' : ''}`);
@@ -1480,6 +1509,108 @@ function SubForm({ sub, onSave, onCancel, isNew }: {
   );
 }
 
+
+const UE_STATUS_PRESENTATION: Record<SubscriberUeState, { label: string; className: string }> = {
+  attached: { label: 'Attached', className: 'bg-nms-green/10 text-nms-green' },
+  detached: { label: 'Detached', className: 'bg-amber-400/10 text-amber-300' },
+  starting: { label: 'Starting', className: 'bg-nms-accent/10 text-nms-accent' },
+  failed: { label: 'Failed', className: 'bg-nms-red/10 text-nms-red' },
+  unconfigured: { label: 'Not prepared', className: 'bg-nms-surface-2 text-nms-text-dim' },
+  unavailable: { label: 'Unavailable', className: 'bg-orange-400/10 text-orange-300' },
+};
+
+type UeRowAction = {
+  action: SubscriberUeAction;
+  label: string;
+  title: string;
+  Icon: typeof Play;
+  confirm?: (imsi: string) => string;
+  /** States the action is allowed in. Undefined means any state. */
+  requires?: SubscriberUeState[];
+  /** Shown instead of `title` when the current state does not allow it. */
+  blocked?: string;
+};
+
+const UE_ROW_ACTIONS: UeRowAction[] = [
+  { action: 'attach', label: 'Attach', title: 'Run attach_ue.sh for this UE', Icon: Play },
+  {
+    action: 'traffic',
+    label: 'Traffic',
+    title: 'Ping through this UE\u2019s tunnels and watch the output',
+    Icon: Activity,
+    //There is no uesimtun device to ping through until the UE has registered
+    requires: ['attached'],
+    blocked: 'Attach this UE first \u2014 traffic needs a registered UE',
+  },
+  { action: 'check', label: 'Check', title: 'Registration and PDU session outcome for this UE', Icon: Search },
+  { action: 'detach', label: 'Detach', title: 'Run dettach_ue.sh for this UE', Icon: Unplug },
+];
+
+//Deleting is a single button, at the end of the row with Edit: it takes the staged
+//files, the deployment, the configmap and the subscriber entry together. There is
+//no UE-only delete, because a UE without its subscriber is not a state worth being
+//able to reach from here.
+const UE_DELETE_GATE: { requires: SubscriberUeState[]; blocked: string } = {
+  //Deleting a UE that is still on the air would pull it out from under a live
+  //registration, so detach is the step before this one
+  requires: ['detached', 'unconfigured'],
+  blocked: 'Detach this UE first \u2014 only a detached UE can be deleted',
+};
+
+//Whether the UE's current state permits an action, and why not when it does not
+function ueActionGate(
+  item: UeRowAction,
+  status?: SubscriberUeStatus,
+): { allowed: boolean; reason: string } {
+  if (!item.requires) {
+    return { allowed: true, reason: item.title };
+  }
+  if (!status) {
+    return { allowed: false, reason: 'Waiting for this UE\u2019s state' };
+  }
+  return item.requires.includes(status.status)
+    ? { allowed: true, reason: item.title }
+    : { allowed: false, reason: item.blocked ?? item.title };
+}
+
+function apiErrorMessage(error: unknown, fallback: string): string {
+  const responseData = (error as {
+    response?: { data?: { error?: string; stderr?: string; message?: string } };
+  })?.response?.data;
+  return responseData?.error
+    || responseData?.stderr
+    || responseData?.message
+    || (error instanceof Error ? error.message : fallback);
+}
+
+function UeStatusBadge({
+  status,
+  loading,
+}: {
+  status?: SubscriberUeStatus;
+  loading: boolean;
+}): JSX.Element {
+  if (!status) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-nms-text-dim">
+        {loading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+        {loading ? 'Checking UE...' : 'Status unavailable'}
+      </div>
+    );
+  }
+
+  const presentation = UE_STATUS_PRESENTATION[status.status];
+  return (
+    <div className="min-w-[150px]" title={status.message}>
+      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs ${presentation.className}`}>
+        {presentation.label}
+      </span>
+      <p className="mt-1 max-w-[210px] truncate text-[11px] text-nms-text-dim">
+        {status.message}
+      </p>
+    </div>
+  );
+}
 interface SubscriberPageProps {
   initialImsiToEdit?: string;
 }
@@ -1498,6 +1629,15 @@ export function SubscriberPage({ initialImsiToEdit }: SubscriberPageProps = {}):
   const [showGenerator, setShowGenerator] = useState(false);
   const [showIPAssignments, setShowIPAssignments] = useState(false);
   const [assigningIPs, setAssigningIPs] = useState(false);
+  const [ueStatuses, setUeStatuses] = useState<Record<string, SubscriberUeStatus>>({});
+  //Which UE's traffic window is open, if any
+  const [trafficImsi, setTrafficImsi] = useState<string | null>(null);
+  const [ueStatusesLoading, setUeStatusesLoading] = useState(false);
+  const [statusRefreshKey, setStatusRefreshKey] = useState(0);
+  const [activeAction, setActiveAction] = useState<{
+    imsi: string;
+    action: SubscriberUeAction | 'delete';
+  } | null>(null);
 
   // Handle navigation from other pages (e.g., RAN page)
   useEffect(() => {
@@ -1515,6 +1655,48 @@ export function SubscriberPage({ initialImsiToEdit }: SubscriberPageProps = {}):
   }, [initialImsiToEdit]);
 
   useEffect(() => { fetch(); }, [fetch]);
+
+  useEffect(() => {
+    const imsis = subscribers.map((subscriber) => subscriber.imsi);
+    if (imsis.length === 0) {
+      setUeStatuses({});
+      setUeStatusesLoading(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    let inFlight = false;
+    const loadStatuses = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      setUeStatusesLoading(true);
+      try {
+        const statuses = await subscriberApi.getUeStatuses(imsis);
+        if (!cancelled) {
+          setUeStatuses(Object.fromEntries(statuses.map((status) => [status.imsi, status])));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          const message = apiErrorMessage(error, 'check_ue.sh is unavailable');
+          setUeStatuses(Object.fromEntries(imsis.map((imsi) => [imsi, {
+            imsi,
+            status: 'unavailable' as const,
+            message,
+          }])));
+        }
+      } finally {
+        inFlight = false;
+        if (!cancelled) setUeStatusesLoading(false);
+      }
+    };
+
+    void loadStatuses();
+    const interval = window.setInterval(loadStatuses, 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [subscribers, statusRefreshKey]);
 
   const handleAutoAssignIPs = async () => {
     const confirmed = window.confirm(
@@ -1547,6 +1729,42 @@ export function SubscriberPage({ initialImsiToEdit }: SubscriberPageProps = {}):
       toast.error(`Failed to assign IPs: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setAssigningIPs(false);
+    }
+  };
+
+  const handleUeAction = async (imsi: string, action: SubscriberUeAction) => {
+    const confirmText = UE_ROW_ACTIONS.find((item) => item.action === action)?.confirm?.(imsi);
+    if (confirmText && !window.confirm(confirmText)) {
+      return;
+    }
+
+    setActiveAction({ imsi, action });
+    try {
+      const result = await subscriberApi.runUeAction(imsi, action);
+      if (!result.success) {
+        throw new Error(result.stderr || result.stdout || result.message);
+      }
+      toast.success(`${UE_ROW_ACTIONS.find((item) => item.action === action)?.label} completed for ${imsi}`);
+      setStatusRefreshKey((value) => value + 1);
+    } catch (error) {
+      toast.error(apiErrorMessage(error, `Failed to ${action} UE ${imsi}`));
+    } finally {
+      setActiveAction(null);
+    }
+  };
+
+  const handleDelete = async (imsi: string) => {
+    if (!confirm(`Delete UE ${imsi}? Its staged files, deployment, configmap and subscriber entry all go.`)) return;
+    setActiveAction({ imsi, action: 'delete' });
+    try {
+      await subscriberApi.delete(imsi);
+      toast.success(`Subscriber ${imsi} removed`);
+      await fetch();
+      setStatusRefreshKey((value) => value + 1);
+    } catch (error) {
+      toast.error(apiErrorMessage(error, `Failed to remove subscriber ${imsi}`));
+    } finally {
+      setActiveAction(null);
     }
   };
 
@@ -1595,6 +1813,10 @@ export function SubscriberPage({ initialImsiToEdit }: SubscriberPageProps = {}):
       {showGenerator && (
         <SIMGeneratorDialog
           onClose={() => setShowGenerator(false)}
+          onProvisioned={() => {
+            void fetch();
+            setStatusRefreshKey((value) => value + 1);
+          }}
         />
       )}
 
@@ -1606,11 +1828,12 @@ export function SubscriberPage({ initialImsiToEdit }: SubscriberPageProps = {}):
           onSave={async s => {
             try {
               await subscriberApi.create(s);
-              toast.success('Subscriber created');
+              toast.success('Subscriber and UE configuration created');
               setShowForm(false);
-              fetch();
-            } catch(e:any) {
-              toast.error(e?.message || 'Failed to create subscriber');
+              await fetch();
+              setStatusRefreshKey((value) => value + 1);
+            } catch (error: unknown) {
+              toast.error(apiErrorMessage(error, 'Failed to create subscriber'));
             }
           }} 
           onCancel={() => setShowForm(false)} 
@@ -1637,65 +1860,101 @@ export function SubscriberPage({ initialImsiToEdit }: SubscriberPageProps = {}):
         />
       )}
 
-      <div className="nms-card overflow-hidden p-0">
-        <table className="w-full text-sm">
+      <div className="nms-card overflow-x-auto p-0">
+        <table className="w-full min-w-[1120px] text-sm">
           <thead>
             <tr className="border-b border-nms-border">
               <th className="text-left px-4 py-3 text-xs font-semibold text-nms-text-dim uppercase tracking-wider">IMSI</th>
               <th className="text-left px-4 py-3 text-xs font-semibold text-nms-text-dim uppercase tracking-wider">MSISDN</th>
-              <th className="text-left px-4 py-3 text-xs font-semibold text-nms-text-dim uppercase tracking-wider">Status</th>
+              <th className="text-left px-4 py-3 text-xs font-semibold text-nms-text-dim uppercase tracking-wider">UE Status</th>
               <th className="text-left px-4 py-3 text-xs font-semibold text-nms-text-dim uppercase tracking-wider">Slices</th>
               <th className="text-left px-4 py-3 text-xs font-semibold text-nms-text-dim uppercase tracking-wider">Sessions</th>
               <th className="text-right px-4 py-3 text-xs font-semibold text-nms-text-dim uppercase tracking-wider">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {subscribers.map((sub: SubscriberListItem) => (
-              <tr key={sub.imsi} className="border-b border-nms-border/50 hover:bg-nms-surface-2/50 transition-colors">
-                <td className="px-4 py-3 font-mono text-xs">{sub.imsi}</td>
-                <td className="px-4 py-3 text-xs text-nms-text-dim">{sub.msisdn?.join(', ') || '—'}</td>
-                <td className="px-4 py-3">
-                  <span className="bg-nms-green/10 text-nms-green text-xs px-2 py-0.5 rounded-full">Active</span>
-                </td>
-                <td className="px-4 py-3">
-                  <span className="bg-nms-accent/10 text-nms-accent text-xs px-2 py-0.5 rounded-full">{sub.slice_count}</span>
-                </td>
-                <td className="px-4 py-3">
-                  <span className="bg-nms-surface-2 text-nms-text-dim text-xs px-2 py-0.5 rounded-full">{sub.session_count}</span>
-                </td>
-                <td className="px-4 py-3 text-right">
-                  <button 
-                    onClick={async () => {
-                      try {
-                        const s = await subscriberApi.get(sub.imsi);
-                        setEditSub(s);
-                        setEditImsi(sub.imsi);
-                      } catch {
-                        toast.error('Failed to load subscriber');
-                      }
-                    }} 
-                    className="text-nms-text-dim hover:text-nms-accent mr-2"
-                  >
-                    <Edit className="w-4 h-4 inline" />
-                  </button>
-                  <button 
-                    onClick={async () => {
-                      if (!confirm(`Delete subscriber ${sub.imsi}?`)) return;
-                      try {
-                        await subscriberApi.delete(sub.imsi);
-                        toast.success('Subscriber deleted');
-                        fetch();
-                      } catch {
-                        toast.error('Failed to delete subscriber');
-                      }
-                    }} 
-                    className="text-nms-text-dim hover:text-nms-red"
-                  >
-                    <Trash2 className="w-4 h-4 inline" />
-                  </button>
-                </td>
-              </tr>
-            ))}
+            {subscribers.map((sub: SubscriberListItem) => {
+              const rowAction = activeAction?.imsi === sub.imsi ? activeAction.action : null;
+              return (
+                <tr key={sub.imsi} className="border-b border-nms-border/50 hover:bg-nms-surface-2/50 transition-colors">
+                  <td className="px-4 py-3 font-mono text-xs">{sub.imsi}</td>
+                  <td className="px-4 py-3 text-xs text-nms-text-dim">{sub.msisdn?.join(', ') || '—'}</td>
+                  <td className="px-4 py-3">
+                    <UeStatusBadge status={ueStatuses[sub.imsi]} loading={ueStatusesLoading} />
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className="bg-nms-accent/10 text-nms-accent text-xs px-2 py-0.5 rounded-full">{sub.slice_count}</span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className="bg-nms-surface-2 text-nms-text-dim text-xs px-2 py-0.5 rounded-full">{sub.session_count}</span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
+                      {UE_ROW_ACTIONS.map((item) => {
+                        const { action, label, Icon } = item;
+                        const gate = ueActionGate(item, ueStatuses[sub.imsi]);
+                        return (
+                          <button
+                            key={action}
+                            type="button"
+                            onClick={() =>
+                              action === 'traffic'
+                                ? setTrafficImsi(sub.imsi)
+                                : void handleUeAction(sub.imsi, action)
+                            }
+                            disabled={activeAction !== null || !gate.allowed}
+                            title={gate.reason}
+                            className="inline-flex items-center gap-1 rounded-md border border-nms-border px-2 py-1.5 text-xs text-nms-text-dim transition-colors hover:border-nms-accent/50 hover:text-nms-accent disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {rowAction === action
+                              ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              : <Icon className="h-3.5 w-3.5" />}
+                            {label}
+                          </button>
+                        );
+                      })}
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            const subscriber = await subscriberApi.get(sub.imsi);
+                            setEditSub(subscriber);
+                            setEditImsi(sub.imsi);
+                          } catch (error) {
+                            toast.error(apiErrorMessage(error, 'Failed to load subscriber'));
+                          }
+                        }}
+                        disabled={activeAction !== null}
+                        title="Edit subscriber"
+                        className="inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs text-nms-text-dim hover:text-nms-accent disabled:opacity-40"
+                      >
+                        <Edit className="h-3.5 w-3.5" /> Edit
+                      </button>
+                      {(() => {
+                        const gate = ueActionGate(
+                          { ...UE_DELETE_GATE, title: 'Delete this UE\u2019s files and its subscriber entry' } as UeRowAction,
+                          ueStatuses[sub.imsi],
+                        );
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => void handleDelete(sub.imsi)}
+                            disabled={activeAction !== null || !gate.allowed}
+                            title={gate.reason}
+                            className="inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs text-nms-text-dim hover:text-nms-red disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {rowAction === 'delete'
+                              ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              : <Trash2 className="h-3.5 w-3.5" />}
+                            Delete UE
+                          </button>
+                        );
+                      })()}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
             {subscribers.length === 0 && (
               <tr>
                 <td colSpan={6} className="px-4 py-12 text-center text-nms-text-dim">
@@ -1728,6 +1987,16 @@ export function SubscriberPage({ initialImsiToEdit }: SubscriberPageProps = {}):
           </button>
         </div>
       )}
+
+      <UeTrafficMonitor
+        imsi={trafficImsi}
+        onClose={() => {
+          setTrafficImsi(null);
+          //A run can leave the UE in a different state than it started in, so pick
+          //the statuses up again rather than leaving stale badges on the rows
+          setStatusRefreshKey((value) => value + 1);
+        }}
+      />
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import pino from 'pino';
 import { IHostExecutor } from '../../domain/interfaces/host-executor';
 import { IConfigRepository } from '../../domain/interfaces/config-repository';
+import { MongoUriResolver } from '../../infrastructure/mongodb/mongo-uri-resolver';
 
 export interface BackupListItem {
   name: string;
@@ -22,6 +23,7 @@ export class BackupRestoreUseCase {
     private readonly logger: pino.Logger,
     private readonly configBackupPath: string,
     private readonly mongoBackupPath: string,
+    private readonly mongoUriResolver: MongoUriResolver,
   ) {}
 
   async createMongoBackup(): Promise<{ success: boolean; backupName: string; error?: string }> {
@@ -32,8 +34,15 @@ export class BackupRestoreUseCase {
 
       this.logger.info({ backupName, backupPath }, 'Creating MongoDB backup');
 
-      // Run mongodump locally in the container so it writes to the container-mounted volume
-      const result = await this.hostExecutor.executeLocalCommand('mongodump', ['-o', backupPath]);
+      // Run mongodump locally in the container so it writes to the container-mounted
+      // volume, against the same database the API reads rather than localhost
+      const uri = await this.mongoUriResolver.resolveServerUri();
+      const result = await this.hostExecutor.executeLocalCommand('mongodump', [
+        '--uri',
+        uri,
+        '-o',
+        backupPath,
+      ]);
       
       if (result.exitCode !== 0) {
         throw new Error(result.stderr || `mongodump failed with exit code ${result.exitCode}`);
@@ -60,8 +69,14 @@ export class BackupRestoreUseCase {
         throw new Error(`Backup not found: ${backupName}`);
       }
 
-      // Run mongorestore locally in the container
-      const result = await this.hostExecutor.executeLocalCommand('mongorestore', ['--drop', backupPath]);
+      // Run mongorestore locally in the container, into the database the API reads
+      const uri = await this.mongoUriResolver.resolveServerUri();
+      const result = await this.hostExecutor.executeLocalCommand('mongorestore', [
+        '--uri',
+        uri,
+        '--drop',
+        backupPath,
+      ]);
       
       if (result.exitCode !== 0) {
         throw new Error(result.stderr || `mongorestore failed with exit code ${result.exitCode}`);

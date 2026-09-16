@@ -11,6 +11,7 @@ import { AuditPage } from './components/audit/AuditPage';
 import { BackupPage } from './pages/BackupPage';
 import { LogsPage } from './pages/LogsPage';
 import { AutoConfigPage } from './pages/AutoConfigPage';
+import { K8sLabPage } from './pages/K8sLabPage';
 import { SuciManagementPage } from './components/suci/SuciManagementPage';
 import { UserManagementPage } from './components/users/UserManagementPage';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -44,6 +45,8 @@ function App(): JSX.Element {
         return <RANPage onNavigateToSubscriber={handleNavigateToSubscriber} />;
       case 'services':
         return <ServicesPage />;
+      case 'k8s-lab':
+        return <K8sLabPage />;
       case 'config':
         return <ConfigPage />;
       case 'subscribers':

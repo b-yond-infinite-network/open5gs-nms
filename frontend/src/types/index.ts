@@ -15,6 +15,74 @@ export interface ServiceStatus {
   memoryBytes: number | null;
   memoryPercent: number | null;
   lastChecked: string;
+  source?: 'systemd' | 'kubernetes';
+  available?: boolean;
+  statusMessage?: string;
+  workload?: string | null;
+  desiredReplicas?: number;
+  readyReplicas?: number;
+}
+
+// ── K8s Lab ──
+export type K8sLabAction = 'install-node' | 'delete-node' | 'start-lab' | 'stop-lab';
+export type K8sUeScenario = 'normal' | 'auth-error' | 'dnn-error' | 'imsi-error' | 'slice-error';
+export type K8sUeScriptAction = 'attach' | 'detach' | 'remove' | 'traffic' | 'check';
+
+export type SubscriberUeAction = 'attach' | 'detach' | 'traffic' | 'check';
+export type SubscriberUeState =
+  | 'unconfigured'
+  | 'detached'
+  | 'starting'
+  | 'attached'
+  | 'failed'
+  | 'unavailable';
+
+export interface SubscriberUeStatus {
+  imsi: string;
+  status: SubscriberUeState;
+  message: string;
+}
+
+export interface K8sLabStatus {
+  rootPath: string;
+  executionUser: string;
+  available: boolean;
+  kubectlAvailable: boolean;
+  clusterReachable: boolean;
+  currentContext: string | null;
+  open5gsNamespace: boolean;
+  open5gsPodCount: number;
+  open5gsReadyPodCount: number;
+  open5gsUnhealthyPods: string[];
+  generatedUes: string[];
+  logFiles: string[];
+}
+
+export interface K8sCommandDefinition {
+  id: string;
+  category: 'cluster' | 'ue-create' | 'ue-action';
+  script: string;
+  guiAction: string;
+  description: string;
+  destructive: boolean;
+  acceptsUeCount: boolean;
+  available: boolean;
+}
+
+export interface K8sScriptResult {
+  success: boolean;
+  action: string;
+  message: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  logFiles: string[];
+  generatedUes: string[];
+}
+
+export interface K8sLogFile {
+  name: string;
+  content: string;
 }
 
 // ── Common SBI Structures ──

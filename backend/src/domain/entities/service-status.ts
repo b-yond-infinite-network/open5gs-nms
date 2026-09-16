@@ -78,6 +78,12 @@ export interface ServiceStatus {
   memoryBytes: number | null;
   memoryPercent: number | null;
   lastChecked: string;
+  source?: 'systemd' | 'kubernetes';
+  available?: boolean;
+  statusMessage?: string;
+  workload?: string | null;
+  desiredReplicas?: number;
+  readyReplicas?: number;
 }
 
 export interface ServiceStatusMap {

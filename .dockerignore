@@ -1,38 +1,63 @@
-# Git
+# Root build context.
+# NOTE: docker-compose.yml builds from ./backend and ./frontend, so those
+# contexts use backend/.dockerignore and frontend/.dockerignore. This file
+# only applies to a build run from the repository root.
+
+# VCS
 .git/
 .gitignore
 .github/
 
-# Documentation
+# Documentation and screenshots
 docs/
 *.md
 !README.md
 
-# Environment
+# Environment / secrets
 .env
 .env.*
 !.env.example
 
-# Development
+# Dependencies
 node_modules/
-npm-debug.log
-.vscode/
-.idea/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
 # Build artifacts
 dist/
 build/
 coverage/
+.nyc_output/
+*.tsbuildinfo
 
-# OS
+# Local runtime state and databases - bind-mounted at runtime, never baked in
+data/
+backups/
+mongo_docker/mongodb_data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Docker / editors / OS
+Dockerfile
+Dockerfile.*
+.dockerignore
+docker-compose*.yml
+docker-compose*.yaml
+.vscode/
+.idea/
 .DS_Store
 Thumbs.db
-
-# Temporary
-*.tmp
-*.bak
+*.swp
+*.swo
 *~
 
 # Logs
 logs/
 *.log
+
+# Temporary
+*.tmp
+*.bak

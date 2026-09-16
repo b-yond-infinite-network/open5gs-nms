@@ -9,12 +9,23 @@ import type {
   ValidationResult,
   ApplyResult,
   AuditLogEntry,
+  K8sLabStatus,
+  K8sScriptResult,
+  K8sLabAction,
+  K8sUeScenario,
+  K8sUeScriptAction,
+  K8sLogFile,
+  K8sCommandDefinition,
+  SubscriberUeAction,
+  SubscriberUeStatus,
 } from '../types';
 import type { InterfaceStatus } from '../stores';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
 
-const api = axios.create({
+//Exported so every API module shares one client: same base URL, same cookie
+//handling, same 401 interceptor
+export const api = axios.create({
   baseURL: `${API_URL}/api`,
   timeout: 60000, // 60 seconds for apply operations that restart all services
   headers: { 'Content-Type': 'application/json' },
@@ -76,11 +87,30 @@ export const subscriberApi = {
   get: (imsi: string) =>
     api.get<Subscriber>(`/subscribers/${imsi}`).then((r) => r.data),
   create: (subscriber: Subscriber) =>
-    api.post('/subscribers', subscriber).then((r) => r.data),
+    api
+      .post<{ message: string; ue: K8sScriptResult }>('/subscribers', subscriber, { timeout: 2 * 60 * 1000 })
+      .then((r) => r.data),
   update: (imsi: string, subscriber: Partial<Subscriber>) =>
     api.put(`/subscribers/${imsi}`, subscriber).then((r) => r.data),
   delete: (imsi: string) =>
-    api.delete(`/subscribers/${imsi}`).then((r) => r.data),
+    api
+      .delete<{ message: string; ue: K8sScriptResult }>(`/subscribers/${imsi}`, { timeout: 2 * 60 * 1000 })
+      .then((r) => r.data),
+  getUeStatuses: (imsis: string[]) =>
+    api
+      .get<{ success: boolean; data: SubscriberUeStatus[] }>('/subscribers/ue-status', {
+        params: { imsis: imsis.join(',') },
+        timeout: 30000,
+      })
+      .then((r) => r.data.data),
+  runUeAction: (imsi: string, action: SubscriberUeAction) =>
+    api
+      .post<K8sScriptResult>(
+        `/subscribers/${encodeURIComponent(imsi)}/ue/${action}`,
+        {},
+        { timeout: 5 * 60 * 1000 },
+      )
+      .then((r) => r.data),
   autoAssignIPs: () =>
     api.post<{ success: boolean; data: { assigned: number; skipped: number; failed: number; ipPool: string; errors?: string[] } }>('/subscribers/auto-assign-ips').then((r) => r.data),
   getIPAssignments: () =>
@@ -104,7 +134,11 @@ export const healthApi = {
 
 // ── Interface Status ──
 export const interfaceApi = {
-  getStatus: () => api.get<InterfaceStatus>('/interface-status').then((r) => r.data),
+  // detail=true also walks the UE pods for per-UE rows; leave it off for polls.
+  getStatus: (detail?: boolean) =>
+    api
+      .get<InterfaceStatus>('/interface-status', detail ? { params: { detail: 'true' } } : undefined)
+      .then((r) => r.data),
 };
 
 // ── Backup & Restore ──
@@ -184,4 +218,36 @@ export const autoConfigApi = {
     api.post<{ success: boolean; message?: string; diffs: Record<string, string> }>('/auto-config/preview', input).then((r) => r.data),
   apply: (input: AutoConfigInput) =>
     api.post<AutoConfigResult>('/auto-config/apply', input).then((r) => r.data),
+};
+
+// ── K8s Lab ──
+const LONG_RUNNING_TIMEOUT_MS = 30 * 60 * 1000;
+
+export const k8sApi = {
+  listCommands: () =>
+    api.get<{ success: boolean; data: K8sCommandDefinition[] }>('/k8s/commands', { timeout: 15000 }).then((r) => r.data.data),
+  getStatus: () =>
+    api.get<{ success: boolean; data: K8sLabStatus }>('/k8s/status', { timeout: 15000 }).then((r) => r.data.data),
+  runAction: (action: K8sLabAction) =>
+    api.post<K8sScriptResult>(`/k8s/actions/${action}`, {}, { timeout: LONG_RUNNING_TIMEOUT_MS }).then((r) => r.data),
+  createUes: (count: number, scenario: K8sUeScenario) =>
+    api.post<K8sScriptResult>('/k8s/ue/create', { count, scenario }, { timeout: 10 * 60 * 1000 }).then((r) => r.data),
+  runUeAction: (action: K8sUeScriptAction, imsis?: string[]) =>
+    api
+      //No imsis acts on the whole batch, which is what the batch buttons send
+      .post<K8sScriptResult>(
+        `/k8s/ue/${action}`,
+        imsis && imsis.length ? { imsis } : {},
+        { timeout: 10 * 60 * 1000 },
+      )
+      .then((r) => r.data),
+  listLogs: () =>
+    api.get<{ success: boolean; data: string[] }>('/k8s/logs', { timeout: 15000 }).then((r) => r.data.data),
+  getLog: (name: string, tail = 200) =>
+    api
+      .get<{ success: boolean; data: K8sLogFile }>(`/k8s/logs/${encodeURIComponent(name)}`, {
+        params: { tail },
+        timeout: 15000,
+      })
+      .then((r) => r.data.data),
 };

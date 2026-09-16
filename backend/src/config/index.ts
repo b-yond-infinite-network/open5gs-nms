@@ -2,6 +2,8 @@ export interface AppConfig {
   port: number;
   wsPort: number;
   mongodbUri: string;
+  /** "<namespace>/<service>" to resolve the Mongo address from the cluster instead. */
+  mongodbK8sService: string | null;
   configPath: string;
   backupPath: string;
   mongoBackupPath: string;
@@ -13,6 +15,11 @@ export interface AppConfig {
   sessionMaxAge: number;
   firstRunPassword: string | null;
   isProduction: boolean;
+  laas5gsaRoot: string;
+  k8sKubeconfig: string;
+  k8sExecUser: string;
+  /** Namespace the Open5GS NFs and the UE simulator run in. */
+  k8sNamespace: string;
 }
 
 export function loadAppConfig(): AppConfig {
@@ -22,6 +29,7 @@ export function loadAppConfig(): AppConfig {
     port: parseInt(process.env.PORT || '3001', 10),
     wsPort: parseInt(process.env.WS_PORT || '3002', 10),
     mongodbUri: process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/open5gs',
+    mongodbK8sService: process.env.MONGODB_K8S_SERVICE || null,
     configPath: process.env.CONFIG_PATH || '/etc/open5gs',
     backupPath: process.env.BACKUP_PATH || '/var/open5gs/backups/config',
     mongoBackupPath: process.env.MONGO_BACKUP_PATH || '/var/open5gs/backups/mongodb',
@@ -35,5 +43,9 @@ export function loadAppConfig(): AppConfig {
     // Only set secure cookie flag when explicitly running behind HTTPS.
     // NODE_ENV=production does NOT imply HTTPS — many deployments run HTTP internally.
     isProduction: process.env.COOKIE_SECURE === 'true',
+    laas5gsaRoot: process.env.LAAS_5GSA_ROOT || '/home/ubuntu/laas-5gsa-k8s-1',
+    k8sKubeconfig: process.env.K8S_KUBECONFIG || '/home/ubuntu/.kube/config',
+    k8sExecUser: process.env.K8S_EXEC_USER || 'ubuntu',
+    k8sNamespace: process.env.K8S_OPEN5GS_NAMESPACE || 'open5gs',
   };
 }

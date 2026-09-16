@@ -9,6 +9,7 @@ export interface ISubscriberRepository {
   delete(imsi: string): Promise<void>;
   count(): Promise<number>;
   search(query: string, skip?: number, limit?: number): Promise<SubscriberListItem[]>;
+  countSearch(query: string): Promise<number>;
   updateSDForAll(sd: string, sst?: number): Promise<number>;
   assignIPv4(imsi: string, ipv4: string): Promise<void>;
 }
